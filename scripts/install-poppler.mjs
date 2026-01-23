@@ -2,8 +2,7 @@ import { execSync } from "child_process";
 import fs from "fs";
 
 const url =
-  "https://github.com/bournechoi4353/pdf-explainer/releases/download/poppler-amzn2-v1/poppler-amzn2.tar.gz";
-
+  "https://github.com/bournechoi4353/pdf-explainer/releases/download/poppler-bundle-v2/poppler-amzn2.tar.gz";
 console.log("Downloading Poppler bundle:", url);
 
 execSync(`mkdir -p vendor && curl -L "${url}" -o /tmp/poppler.tgz`, { stdio: "inherit" });
