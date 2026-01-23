@@ -45,3 +45,10 @@ next-env.d.ts
 .env
 .env.local
 .env.*
+
+# poppler build artifacts
+vendor/
+poppler-amzn2.tar.gz
+
+# local build helpers
+scripts/build-poppler-amzn2.sh
