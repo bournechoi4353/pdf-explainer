@@ -37,15 +37,29 @@ export default function Page() {
         body: form,
       });
 
-      const data = await res.json();
+      const raw = await res.text();
+      let data: any;
+
+      try {
+        data = JSON.parse(raw);
+      } catch {
+        setOutput("Server returned non-JSON output:\n\n" + raw);
+        return;
+      }
+
+      console.log("API response:", data);
 
       if (!res.ok) {
-        setOutput(`**Error:** ${data?.error || "Unknown error"}`);
+        setOutput(
+          `Error: ${data?.error || "Unknown error"}\n\n${
+            data?.details || ""
+          }`
+        );
       } else {
-        setOutput(data.output);
+        setOutput(data.output || "No explanation returned.");
       }
     } catch (e: any) {
-      setOutput(`**Request failed:** ${e.message}`);
+      setOutput("Request failed: " + e.message);
     } finally {
       setLoading(false);
     }
@@ -53,104 +67,73 @@ export default function Page() {
 
   return (
     <div className="min-h-screen bg-background">
-      <main className="container mx-auto max-w-4xl px-4 py-12 sm:px-6 lg:px-8">
-        {/* HERO */}
+      <main className="container mx-auto max-w-4xl px-4 py-12">
+        {/* Header */}
         <div className="mb-10 text-center">
-          <div className="mb-4 inline-flex items-center justify-center rounded-full bg-primary/10 ring-1 ring-primary/20 p-3">
+          <div className="mb-4 inline-flex items-center justify-center rounded-full bg-primary/15 p-3">
             <Sparkles className="h-8 w-8 text-primary" />
           </div>
-
-          <h1 className="mb-3 text-4xl font-bold tracking-tight sm:text-5xl">
-            <span className="title-accent">PDF Highlight Explainer</span>
+          <h1 className="mb-3 text-4xl font-bold text-foreground">
+            PDF Highlight Explainer
           </h1>
-
-          <p className="mx-auto max-w-2xl text-lg text-muted-foreground">
-            Upload a PDF, paste what you highlighted, and get an intelligent explanation.
-            Best results with{" "}
-            <span className="font-semibold text-foreground/90">
-              1–2 full sentences
-            </span>
-            .
-          </p>
-
-          <p className="mx-auto mt-3 max-w-2xl text-sm text-muted-foreground">
-            Uses only the provided excerpt. Designed to support understanding —
-            not replace thinking.
+          <p className="mx-auto max-w-2xl text-muted-foreground">
+            Upload a PDF, paste what you highlighted, and get a clear,
+            context-aware explanation.
           </p>
         </div>
 
-        {/* INPUT CARD */}
-        <div className="mb-8 overflow-hidden rounded-2xl border border-border/60 bg-card/90 shadow-[0_10px_30px_-18px_rgba(0,0,0,0.6)] backdrop-blur card-hover">
-          <div className="space-y-7 p-6 sm:p-8">
+        {/* Input Card */}
+        <div className="mb-8 rounded-xl border border-border bg-card shadow-lg">
+          <div className="space-y-6 p-6">
             {/* Upload */}
-            <div className="space-y-3">
-              <label className="flex items-center gap-2 text-sm font-semibold text-card-foreground">
+            <div className="space-y-2">
+              <label className="flex items-center gap-2 text-sm font-semibold">
                 <Upload className="h-4 w-4" />
                 Upload PDF
               </label>
-
               <input
                 type="file"
                 accept="application/pdf"
                 onChange={(e) => setFile(e.target.files?.[0] || null)}
-                className="block w-full cursor-pointer rounded-xl border border-input/70 bg-card/70 px-4 py-3 text-sm
-                           transition-colors file:mr-4 file:cursor-pointer file:rounded-lg file:border-0
-                           file:bg-primary file:px-4 file:py-2 file:text-sm file:font-semibold
-                           file:text-primary-foreground hover:file:bg-primary/90
-                           focus:outline-none focus:ring-2 focus:ring-ring/60"
+                className="block w-full rounded-lg border border-input bg-card px-4 py-3 text-sm"
               />
-
               {file && (
-                <div className="flex items-center gap-2 rounded-lg bg-muted/70 px-3 py-2 text-sm text-muted-foreground ring-1 ring-border/50">
+                <div className="flex items-center gap-2 text-xs text-muted-foreground">
                   <FileText className="h-4 w-4" />
-                  <span className="font-medium text-foreground/90">
-                    {file.name}
-                  </span>
-                  <span className="text-xs">
-                    ({Math.round(file.size / 1024)} KB)
-                  </span>
+                  {file.name}
                 </div>
               )}
             </div>
 
             {/* Highlight */}
-            <div className="space-y-3">
-              <label className="flex items-center gap-2 text-sm font-semibold text-card-foreground">
-                <FileText className="h-4 w-4" />
-                Highlighted Text
-              </label>
-
+            <div className="space-y-2">
+              <label className="text-sm font-semibold">Highlighted Text</label>
               <textarea
                 rows={5}
                 value={highlight}
                 onChange={(e) => setHighlight(e.target.value)}
+                className="w-full rounded-lg border border-input bg-card px-4 py-3 text-sm"
                 placeholder='Example: "Lennie continued to snort into the pool."'
-                className="w-full rounded-xl border border-input/70 bg-card/70 px-4 py-3 text-sm
-                           placeholder:text-muted-foreground/90 outline-none
-                           focus:ring-2 focus:ring-ring/60
-                           focus:shadow-[0_0_0_6px_rgba(59,130,246,0.10)]"
               />
-
-              <div className="flex items-center justify-between text-xs text-muted-foreground">
+              <div className="flex justify-between text-xs text-muted-foreground">
                 <span>{highlightWordCount} words</span>
-                {highlightTooShort && highlight.trim() && (
-                  <div className="flex items-center gap-1.5 text-amber-500">
+                {highlightTooShort && highlight && (
+                  <span className="flex items-center gap-1 text-amber-500">
                     <AlertCircle className="h-3.5 w-3.5" />
-                    <span>Try at least 3+ words</span>
-                  </div>
+                    Try 3+ words
+                  </span>
                 )}
               </div>
             </div>
 
             {/* Controls */}
-            <div className="grid gap-6 sm:grid-cols-2">
-              <div className="space-y-3">
+            <div className="grid gap-4 sm:grid-cols-2">
+              <div>
                 <label className="text-sm font-semibold">Explanation Mode</label>
                 <select
                   value={mode}
                   onChange={(e) => setMode(e.target.value as Mode)}
-                  className="w-full rounded-xl border border-input/70 bg-card/70 px-4 py-3 text-sm
-                             focus:outline-none focus:ring-2 focus:ring-ring/60"
+                  className="mt-1 w-full rounded-lg border border-input bg-card px-3 py-2 text-sm"
                 >
                   <option value="quick">Quick</option>
                   <option value="breakdown">Breakdown</option>
@@ -159,15 +142,14 @@ export default function Page() {
                 </select>
               </div>
 
-              <div className="space-y-3">
+              <div>
                 <label className="text-sm font-semibold">Reading Level</label>
                 <select
                   value={readingLevel}
                   onChange={(e) =>
                     setReadingLevel(e.target.value as ReadingLevel)
                   }
-                  className="w-full rounded-xl border border-input/70 bg-card/70 px-4 py-3 text-sm
-                             focus:outline-none focus:ring-2 focus:ring-ring/60"
+                  className="mt-1 w-full rounded-lg border border-input bg-card px-3 py-2 text-sm"
                 >
                   <option value="middle">Middle School</option>
                   <option value="high">High School</option>
@@ -177,20 +159,16 @@ export default function Page() {
               </div>
             </div>
 
-            {/* CTA */}
+            {/* Button */}
             <button
               onClick={handleExplain}
-              disabled={!file || !highlight.trim() || loading}
-              className="group relative w-full rounded-xl bg-primary px-6 py-4 text-sm font-semibold
-                         text-primary-foreground shadow-[0_14px_34px_-20px_rgba(59,130,246,0.75)]
-                         transition-all hover:bg-primary/90 hover:-translate-y-[1px]
-                         focus:outline-none focus:ring-2 focus:ring-ring/70
-                         disabled:opacity-50 disabled:hover:translate-y-0"
+              disabled={!file || !highlight || loading}
+              className="w-full rounded-lg bg-primary px-6 py-3 text-sm font-semibold text-primary-foreground disabled:opacity-50"
             >
               {loading ? (
                 <span className="flex items-center justify-center gap-2">
                   <Loader2 className="h-4 w-4 animate-spin" />
-                  Analyzing...
+                  Analyzing…
                 </span>
               ) : (
                 <span className="flex items-center justify-center gap-2">
@@ -202,27 +180,20 @@ export default function Page() {
           </div>
         </div>
 
-        {/* OUTPUT */}
-        {(output || loading) && (
-          <div className="overflow-hidden rounded-2xl border border-border/60 bg-card/90 shadow-[0_10px_30px_-18px_rgba(0,0,0,0.6)] backdrop-blur card-hover">
-            <div className="border-b border-border/60 bg-muted/40 px-6 py-4">
-              <h2 className="text-sm font-semibold">Explanation</h2>
-            </div>
-
-            <div className="p-6">
-              <div className="prose prose-invert max-w-none prose-p:leading-7 prose-li:leading-7">
-                <ReactMarkdown remarkPlugins={[remarkGfm]}>
-                  {output || "Generating explanation..."}
-                </ReactMarkdown>
+            {output && (
+              <div className="rounded-xl border border-border bg-card shadow-lg overflow-hidden">
+                <div className="border-b border-border bg-muted/40 px-6 py-4">
+                  <h2 className="text-sm font-semibold text-card-foreground">Explanation</h2>
+                </div>
+                <div className="p-6">
+                  <div className="prose prose-invert max-w-none prose-headings:mt-4 prose-headings:mb-2 prose-p:my-2 prose-li:my-1">
+                    <ReactMarkdown remarkPlugins={[remarkGfm]}>
+                      {output}
+                    </ReactMarkdown>
+                  </div>
+                </div>
               </div>
-            </div>
-          </div>
-        )}
-
-        <div className="mt-10 text-center text-xs text-muted-foreground">
-          Built for reading comprehension and accessibility — not for replacing
-          learning.
-        </div>
+            )}
       </main>
     </div>
   );
