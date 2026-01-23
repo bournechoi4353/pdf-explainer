@@ -5,13 +5,15 @@
   "scripts": {
     "dev": "NEXT_DISABLE_TURBOPACK=1 next dev",
     "build": "next build",
-    "start": "next start"
+    "start": "next start",
+    "postinstall": "node scripts/install-poppler.mjs"
   },
   "dependencies": {
     "clsx": "^2.1.1",
     "lucide-react": "^0.562.0",
     "next": "16.1.1",
     "openai": "^6.16.0",
+    "pdf-parse": "^1.1.1",
     "pdfjs-dist": "^5.4.530",
     "react": "19.2.3",
     "react-dom": "19.2.3",
