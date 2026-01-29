@@ -1,119 +1,164 @@
+// app/api/explain/route.ts
 import { NextResponse } from "next/server";
+import path from "path";
 import fs from "fs/promises";
-import fsSync from "fs";
+import { existsSync } from "fs";
 import os from "os";
 import { spawn } from "child_process";
 import OpenAI from "openai";
 
 export const runtime = "nodejs";
 
-async function extractPdfText(pdfFile: File): Promise<string> {
-  const buffer = Buffer.from(await pdfFile.arrayBuffer());
+type Mode = "quick" | "breakdown" | "example" | "assumptions";
+type ReadingLevel = "middle" | "high" | "college" | "expert";
 
-  const tmpDir = os.tmpdir();
-  const inputPath = `${tmpDir}/input-${Date.now()}.pdf`;
-  const outputPath = `${tmpDir}/output-${Date.now()}.txt`;
-
-  await fs.writeFile(inputPath, buffer);
-
-  const binPath =
-    process.platform === "darwin"
-      ? "pdftotext"
-      : `${process.cwd()}/vendor/poppler/bin/pdftotext`;
-
-  const libPath = `${process.cwd()}/vendor/poppler/lib`;
-
-  if (process.platform !== "darwin" && !fsSync.existsSync(binPath)) {
-    throw new Error(`pdftotext not found at ${binPath}`);
-  }
-
-  const text = await new Promise<string>((resolve, reject) => {
-    const child = spawn(binPath, ["-layout", inputPath, outputPath], {
-      env: {
-        ...process.env,
-        ...(process.platform === "linux" ? { LD_LIBRARY_PATH: libPath } : {}),
-      },
-    });
-
-    let stderr = "";
-    child.stderr.on("data", (d) => (stderr += d.toString()));
-    child.on("error", reject);
-
-    child.on("close", async (code) => {
-      if (code !== 0) {
-        return reject(new Error(`pdftotext failed (code ${code}): ${stderr}`));
-      }
-      const out = await fs.readFile(outputPath, "utf8");
-      resolve(out);
-    });
-  });
-
-  await Promise.allSettled([fs.unlink(inputPath), fs.unlink(outputPath)]);
-  return text;
+function safeString(x: unknown) {
+  return typeof x === "string" ? x : "";
 }
 
-/** Normalize for matching: lowercase + collapse whitespace */
-function norm(s: string) {
-  return s.toLowerCase().replace(/\s+/g, " ").trim();
+function normalize(s: string) {
+  return s.replace(/\s+/g, " ").trim();
 }
 
-/**
- * Find highlight in the PDF text and return a chunk around it.
- * Falls back to start-of-doc if not found.
- */
-function getContextChunk(pdfText: string, highlight: string, radius = 2200) {
-  const original = pdfText || "";
-  const h = highlight || "";
+function findContext(text: string, highlightRaw: string) {
+  const highlight = normalize(highlightRaw);
+  const textNorm = text;
+  const haystack = textNorm.toLowerCase();
+  const needle = highlight.toLowerCase();
 
-  if (!original.trim()) {
+  const idx = haystack.indexOf(needle);
+
+  // If we can't find the exact highlight, just return the first chunk as "context".
+  if (idx === -1) {
+    const fallback = textNorm.slice(0, 3500);
     return {
-      context: "",
       found: false,
-      start: 0,
-      end: 0,
+      context: fallback,
     };
   }
 
-  const origNorm = norm(original);
-  const hNorm = norm(h);
+  // Grab a window around the match
+  const windowChars = 4000;
+  const start = Math.max(0, idx - Math.floor(windowChars * 0.45));
+  const end = Math.min(textNorm.length, idx + needle.length + Math.floor(windowChars * 0.55));
+  const context = textNorm.slice(start, end);
 
-  // If highlight is too short, don’t try too hard — just return start.
-  if (hNorm.length < 8) {
-    const context = original.slice(0, Math.min(original.length, 12000));
-    return { context, found: false, start: 0, end: context.length };
+  return {
+    found: true,
+    context,
+  };
+}
+
+async function runPdftotext(pdfBuffer: Buffer) {
+  // Prefer vendored poppler when deployed on Vercel (or if present locally)
+  const vendorBin = path.join(process.cwd(), "vendor", "poppler", "bin", "pdftotext");
+  const vendorLib = path.join(process.cwd(), "vendor", "poppler", "lib");
+
+  // If vendor exists, use it; otherwise fall back to PATH (brew poppler locally).
+  const useVendor = existsSync(vendorBin);
+
+  const binPath = useVendor ? vendorBin : "pdftotext";
+
+  // Write to temp
+  const tmpDir = os.tmpdir();
+  const inputPath = path.join(tmpDir, `pdfex-${crypto.randomUUID()}.pdf`);
+  const outputPath = path.join(tmpDir, `pdfex-${crypto.randomUUID()}.txt`);
+
+  await fs.writeFile(inputPath, pdfBuffer);
+
+  // Make sure executable bit is set (sometimes tar extraction can lose it)
+  if (useVendor) {
+    try {
+      // @ts-ignore
+      const { chmod } = await import("fs/promises");
+      await chmod(vendorBin, 0o755);
+    } catch {
+      // ignore
+    }
   }
 
-  // Find in normalized space
-  let idx = origNorm.indexOf(hNorm);
+  const env = {
+    ...process.env,
+    // Ensure our vendored binaries are discoverable (not strictly required if we spawn by full path)
+    PATH: useVendor ? `${path.dirname(vendorBin)}:${process.env.PATH || ""}` : process.env.PATH || "",
+    // CRITICAL: let Linux dynamic loader find libpoppler.so.* and friends
+    LD_LIBRARY_PATH: useVendor
+      ? `${vendorLib}:${process.env.LD_LIBRARY_PATH || ""}`
+      : process.env.LD_LIBRARY_PATH || "",
+  };
 
-  // Fallback: try shorter highlight (first ~120 chars) if user pasted too much
-  if (idx === -1 && hNorm.length > 140) {
-    idx = origNorm.indexOf(hNorm.slice(0, 140));
+  const result = await new Promise<{ code: number | null; stdout: string; stderr: string }>((resolve) => {
+    const child = spawn(binPath, ["-layout", inputPath, outputPath], {
+      env,
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+
+    let stdout = "";
+    let stderr = "";
+
+    child.stdout.on("data", (d) => (stdout += d.toString()));
+    child.stderr.on("data", (d) => (stderr += d.toString()));
+    child.on("close", (code) => resolve({ code, stdout, stderr }));
+    child.on("error", (err) => resolve({ code: -1, stdout: "", stderr: String(err) }));
+  });
+
+  if (result.code !== 0) {
+    throw new Error(
+      `pdftotext failed (code ${result.code}): ${result.stderr || result.stdout || "unknown error"}`
+    );
   }
 
-  // If still not found, return start chunk
-  if (idx === -1) {
-    const context = original.slice(0, Math.min(original.length, 12000));
-    return { context, found: false, start: 0, end: context.length };
+  const text = await fs.readFile(outputPath, "utf8");
+
+  // Cleanup best-effort
+  void fs.unlink(inputPath).catch(() => {});
+  void fs.unlink(outputPath).catch(() => {});
+
+  return {
+    text,
+    debug: {
+      useVendor,
+      binPath: useVendor ? vendorBin : "pdftotext (PATH)",
+      vendorLibExists: useVendor ? existsSync(vendorLib) : false,
+      libHint: useVendor ? vendorLib : "(system)",
+      platform: process.platform,
+      arch: process.arch,
+    },
+  };
+}
+
+function buildInstructions(mode: Mode) {
+  switch (mode) {
+    case "quick":
+      return `Explain the highlight in 2–4 sentences, notice any key terms, and connect it to the nearby context.`;
+    case "breakdown":
+      return `Explain in a structured way:
+- Main claim (1 line)
+- Key phrases decoded (bullets)
+- Reference resolution: what “this/it/they/which” refers to (if present)
+- Why it matters in context (1–2 lines)`;
+    case "example":
+      return `Explain it, then give ONE short example or analogy that matches the context.`;
+    case "assumptions":
+      return `Explain it and explicitly list assumptions you had to make because context may be missing.`;
+    default:
+      return `Explain clearly using only the provided context.`;
   }
+}
 
-  // Map normalized index back to original-ish index:
-  // We'll approximate by searching the original for a simpler needle:
-  // Use a small “needle” from the highlight to locate in original text.
-  const needle = h.trim().slice(0, Math.min(h.trim().length, 80));
-  let origIdx = needle ? original.toLowerCase().indexOf(needle.toLowerCase()) : -1;
-
-  // If that failed, approximate using ratio
-  if (origIdx === -1) {
-    const ratio = original.length / Math.max(origNorm.length, 1);
-    origIdx = Math.floor(idx * ratio);
+function mapReadingLevel(level: ReadingLevel) {
+  switch (level) {
+    case "middle":
+      return "Write at a middle school reading level. Be simple and clear.";
+    case "high":
+      return "Write at a high school reading level. Clear, but not childish.";
+    case "college":
+      return "Write at a college reading level. More precise, but still readable.";
+    case "expert":
+      return "Write at an expert level. Use precise terminology, concise.";
+    default:
+      return "Write clearly.";
   }
-
-  const start = Math.max(0, origIdx - radius);
-  const end = Math.min(original.length, origIdx + radius);
-  const context = original.slice(start, end);
-
-  return { context, found: true, start, end };
 }
 
 export async function POST(req: Request) {
@@ -121,99 +166,73 @@ export async function POST(req: Request) {
     const form = await req.formData();
 
     const pdf = form.get("pdf");
-    const highlight = String(form.get("highlight") || "").trim();
-    const mode = String(form.get("mode") || "breakdown");
-    const readingLevel = String(form.get("readingLevel") || "high");
+    const highlight = safeString(form.get("highlight"));
+    const mode = (safeString(form.get("mode")) as Mode) || "breakdown";
+    const readingLevel = (safeString(form.get("readingLevel")) as ReadingLevel) || "high";
 
-    if (!(pdf instanceof File)) {
-      return NextResponse.json({ error: "Missing PDF file" }, { status: 400 });
+    if (!pdf || !(pdf instanceof File)) {
+      return NextResponse.json({ error: "Missing PDF upload." }, { status: 400 });
     }
-    if (!highlight) {
-      return NextResponse.json({ error: "Missing highlighted text" }, { status: 400 });
-    }
-    if (!process.env.OPENAI_API_KEY) {
-      return NextResponse.json(
-        {
-          error: "Missing OPENAI_API_KEY",
-          details: "Set it in Vercel env vars (Production) and locally in .env.local",
-        },
-        { status: 500 }
-      );
+    if (!highlight.trim()) {
+      return NextResponse.json({ error: "Missing highlighted text." }, { status: 400 });
     }
 
-    const fullText = await extractPdfText(pdf);
+    const pdfBuffer = Buffer.from(await pdf.arrayBuffer());
 
-    const { context, found } = getContextChunk(fullText, highlight, 2200);
+    const { text, debug } = await runPdftotext(pdfBuffer);
 
-    const modeInstructions: Record<string, string> = {
-      quick: "Explain the highlight in 2–4 clear sentences.",
-      breakdown: `Return Markdown with these sections:
+    const { found, context } = findContext(text, highlight);
 
-### Main claim
-(1 line)
+    const instructions = buildInstructions(mode);
+    const level = mapReadingLevel(readingLevel);
 
-### Key phrases decoded
-- bullets
+    const apiKey = process.env.OPENAI_API_KEY;
+    if (!apiKey) {
+      // Dev-friendly fallback if key isn't set
+      return NextResponse.json({
+        ok: true,
+        output:
+          `FAKE AI OUTPUT (no OPENAI_API_KEY set)\n\n` +
+          `MODE: ${mode}\nFOUND HIGHLIGHT: ${found}\n\nHIGHLIGHT:\n${highlight}\n\nINSTRUCTIONS:\n${instructions}\n\nCONTEXT:\n${context.slice(0, 3500)}`,
+        debug,
+      });
+    }
 
-### Reference resolution
-- bullets (only if present)
+    const client = new OpenAI({ apiKey });
 
-### Why it matters in context
-(1–2 lines)
+    const system = `You are a careful study assistant.
+Rules:
+- Use ONLY the provided context. If insufficient, say what’s missing.
+- Do not hallucinate facts outside the context.
+- Keep it helpful and readable.
+- ${level}`;
 
-Use ONLY the provided context. If insufficient, say what's missing.`,
-      example: "Explain, then give 2 short examples grounded in the context.",
-      assumptions: "Explain and list any assumptions made due to missing context.",
-    };
+    const user = `HIGHLIGHT:\n${highlight}\n\nMODE INSTRUCTIONS:\n${instructions}\n\nCONTEXT (from PDF near the highlight):\n${context}`;
 
-    const levelInstructions: Record<string, string> = {
-      middle: "Write for a middle school reader.",
-      high: "Write for a high school reader.",
-      college: "Write for a college reader.",
-      expert: "Write for an expert reader (precise, concise).",
-    };
-
-    const prompt = `
-MODE: ${mode}
-READING LEVEL: ${readingLevel}
-
-HIGHLIGHT:
-${highlight}
-
-INSTRUCTIONS:
-${modeInstructions[mode] || modeInstructions.breakdown}
-${levelInstructions[readingLevel] || levelInstructions.high}
-
-CONTEXT (from PDF):
-${context}
-`.trim();
-
-    const client = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
-
-    const completion = await client.chat.completions.create({
-      model: "gpt-4.1-mini",
-      temperature: 0.2,
+    const resp = await client.chat.completions.create({
+      model: process.env.OPENAI_MODEL || "gpt-4.1-mini",
+      temperature: 0.3,
       messages: [
-        {
-          role: "system",
-          content:
-            "You are a precise PDF reading assistant. Do not invent facts. Stay grounded in the provided text. Format output as clean Markdown.",
-        },
-        { role: "user", content: prompt },
+        { role: "system", content: system },
+        { role: "user", content: user },
       ],
     });
 
-    const output = completion.choices?.[0]?.message?.content?.trim() || "";
+    const output = resp.choices?.[0]?.message?.content?.trim() || "No output.";
 
     return NextResponse.json({
       ok: true,
       output,
-      meta: { highlightFoundInContext: found },
+      foundHighlight: found,
+      debug,
     });
   } catch (err: any) {
-    console.error("API error:", err);
+    const msg = err?.message || String(err);
     return NextResponse.json(
-      { error: "PDF extraction failed", details: err?.message || String(err) },
+      {
+        error: "PDF extraction failed",
+        details: msg,
+      },
       { status: 500 }
     );
   }
